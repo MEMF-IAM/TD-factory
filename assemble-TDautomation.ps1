@@ -11,6 +11,9 @@ param(
     ,
     [string]
     $output
+    ,
+    [switch]
+    $sparse
 )
 'Assembling json files in [{0}]' -f ( get-item -literalPath $root | select-object -expand fullName ) | write-host;
 if ( $name ) {
@@ -36,7 +39,7 @@ if ( test-path -literalPath $_assembler -ea silentlyContinue ) {
             } else {
                 $_output = @{};
             }
-            & $_assembler -file $_target -mode "assemble" @_output;
+            & $_assembler -file $_target -mode "assemble" -sparse:$sparse @_output;
             '  Done.' | write-host;
         } else {
             '  Skipping directory [{0}]' -f $_.fullName | write-host;

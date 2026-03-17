@@ -1,8 +1,59 @@
+<#
+    .SYNOPSIS
+    #TODO
+
+    .DESCRIPTION
+    #TODO
+
+    .PARAMETER file
+    Specifies an individual file, a glob spec or a root directory to be processed.
+
+    .PARAMETER mode
+    Specifies the processing required: Either 'dissect' or 'assemble'.
+    Mode 'dissect' extracts provided file(s) into (a) structured, comparable filesystem(s) where the root directory of each filesystem is named equal to its source file.
+    Mode 'assemble' compiles (a) serialized JSON file(s) by gathering all file contents in each provided filesystem identified by its root name.
+
+    .PARAMETER output
+    Optionally, the output file(s) in 'assemble' mode may be named differently from its (their) corresponding source root filesystem(s).
+
+    .PARAMETER sparse
+    When assembling, if set results in a non-compressed, i.e. whitespace preserved, JSON output file. By default, assemblies are compressed and thus less human readable.
+
+    .INPUTS
+    JSON serialized file(s) to dissect into (a) comparable, structured filesystem(s)
+
+    .OUTPUTS
+    JSON serialized file(s) assembled from (a) structuted filesystem(s)
+
+    .EXAMPLE
+    PS> <scriptname> -file "My TOPdesk automation export.json" -mode "dissect" -output "Directory to use as base for TOPdesk automation export"
+
+    .EXAMPLE
+    PS> <scriptname> -file "Directory used as base for TOPdesk automation assembly\My TOPdesk automation adjusted.json" -mode "assemble"
+
+    .EXAMPLE
+    PS> <scriptname> -file "Directory used as base for TOPdesk automation assembly" -mode "assemble" -sparse
+
+    .NOTES
+    Author: R.J. de Vries (Autom8ion@3Bdesign.nl)
+    GitHub: WowBagger15/Autom8ion
+            MEMF-IAM/TD-Factory
+    Release notes:
+        Version 1.2     : Changes to make comparing JSON output more consistent regardless of given source
+        Version 1.0     : First operational version
+        Version 0.9     : Init
+
+#>
+
 #region pragma
 #requires -version 6
 #endregion pragma
 
-[cmdLetBinding()]
+#region modules and namespaces
+#endregion modules and namespaces
+
+#region interface
+[cmdletBinding()]
 param(
     [parameter( mandatory, valueFromPipeline )]
     $file
@@ -14,22 +65,196 @@ param(
     [string]
     $mode = "dissect"
     ,
-    [parameter()]
     [validateScript( { $mode -eq "assemble" } )]
     $output
+    ,
+    [validateScript( { $mode -eq "assemble" } )]
+    [switch]
+    $sparse
 )
+#endregion interface
+#region begin block
 begin {
     $__ = @{
         path          = split-path -parent -path $myInvocation.myCommand.definition
         name          = ( get-item $myInvocation.myCommand.definition ).baseName
         pid           = ( [System.Diagnostics.Process]::getCurrentProcess() ).id
-        version       = '0.3.0'
+        version       = '1.1.0'
         depth         = 10
+        compress      = -not ( [bool]( $sparse) )
         indentation   = '    '
         identity      = '__stepIdentity'
         directive     = 'TDgarage'
     }
+    function recurseTo-pipeline {
+        <#
+        .SYNOPSIS
+            Recursively calls calling function feeding its pipeline rather than a parameter, which is removed from the bound parameter collection before invocation
+            This is actually part of another module but generously incorporated here.
+        .PARAMETER context
+            The automatically created $PScmdLet variable from *within* the calling function itself
+        .PARAMETER sending
+            Name of the parameter that is being sent as pipeline input
+        .PARAMETER feed
+            Actual data fed into the pipeline
+        .EXAMPLE
+            function foo {
+                param(
+                    [parameter( valueFromPipeline )]
+                    [object[]]
+                    $main
+                    ,
+                    [int32]
+                    $mode   = 42
+                    ,
+                    [switch]
+                    $extra
+                )
+                process {
+                    if ( -not $myInvocation.expectingInput ) {
+                        return;
+                    }
+                    "Processing main item [{0}]" -f $_ | write-host;
+                }
+                end {
+                    if ( -not $myInvocation.expectingInput ) {
+                        recurseTo-pipeline $PScmdLet "main" $main;
+                    }
+                }
+            }
+        .NOTES
+            TODO::Proper error handling
+        #>
+        [cmdletBinding()] 
+        param(
+            [parameter( mandatory, position = 0 )]
+            [system.management.automation.PScmdlet]
+            $context
+            ,
+            [parameter( mandatory, position = 1 )]
+            [string]
+            $sending
+            ,
+            [parameter( mandatory, position = 2 )]
+            [object]
+            $feed
+        )
+        try {
+            # ! Must use the $PScmdLet.myInvocation chain here (in this case $context.myInvocation), and *not* directly $myInvocation
+            [void]$context.myInvocation.boundParameters.remove( $sending );
+            $_arguments = [hashTable]( $context.myInvocation.boundParameters );
+            'Recursing pipeline to function [{0}] for parameter [{1}]' -f $context.MyInvocation.MyCommand.name, $sending | write-debug;
+            $feed | & $context.myInvocation.myCommand @_arguments;
+        } catch {}
+    }
+    function sort-objectEx {
+        param(
+            [parameter( valueFromPipeline )]
+            [object]
+            $object
+            ,
+            [int]
+            $depth = 2
+        )
+        begin {
+            if ( $depth -le 0 ) {
+                '{0}: Maximum depth reached' -f ( get-PScallStack | select-object -first 1 -expand command ) | write-warning;
+                return;
+            }
+        }
+        process {
+            if ( $object -is [hashTable] ) {
+                $_export = [ordered]@{};
+                $object.keys | sort-object |% {
+                    if ( $object.$_ -is [array] ) {
+                        $_export.$_ = @( ( $object.$_ | sort-objectEx -depth ( $depth - 1 ) ) );
+                    } else {
+                        $_export.$_ = $object.$_ | sort-objectEx -depth ( $depth - 1 );
+                    }
+                }
+                return $_export;
+            }
+            if ( $object -is [array] ) {
+                if ( $object.count ) {
+                    return @( ( $object | sort-objectEx ( $depth - 1 ) ) );
+                } else {
+                    return @();
+                }
+            }
+            return $object;
+        }
+    }
+    function convertTo-JSONsorted {
+        <#
+        .SYNOPSIS
+        Short description
+        .DESCRIPTION
+        Long description
+        .EXAMPLE
+        Example of how to use this cmdlet
+        .EXAMPLE
+        Another example of how to use this cmdlet
+        .INPUTS
+        Inputs to this cmdlet (if any)
+        .OUTPUTS
+        Output from this cmdlet (if any)
+        .NOTES
+        General notes
+        .COMPONENT
+        The component this cmdlet belongs to
+        .ROLE
+        The role this cmdlet belongs to
+        .FUNCTIONALITY
+        The functionality that best describes this cmdlet
+        #>
+        [cmdletBinding( positionalBinding )]
+        [alias()]
+        [outputType( [object] )]
+        param (
+            [parameter( mandatory, valueFromPipeline, position = 0 )]
+            [object]
+            $object
+            ,
+            [parameter( position = 1 )]
+            [int]
+            $depth = 2
+            ,
+            [switch]
+            $AsArray
+            ,
+            [switch]
+            $Compress
+            ,
+            [switch]
+            $EnumsAsStrings
+            ,
+            [Newtonsoft.Json.StringEscapeHandling]
+            $EscapeHandling
+        )
+        begin {
+            [collections.arrayList]$_input = @();
+            $_options = [hashTable]( $PScmdLet.myInvocation.boundParameters );
+            if ( -not $_options.containsKey( "depth" ) ) {
+                $_options.Depth = $depth;
+            }
+        }
+        process {
+            [void]$_input.add( ( $object | convertTo-Json -depth $depth | convertFrom-Json -asHashTable ) );
+        }
+        end {
+            $_input | forEach-object <# -ThrottleLimit 5 #> {
+                $_ | sort-objectEx -depth $depth
+            } | convertTo-Json @_options;
+        }
+    }
     function get-source {
+        <#
+        .SYNOPSIS
+        Reads source file(s) and converts it (them) into (a) custom object(s) using converFrom-JSON.
+
+        .PARAMETER source
+        One or more directories and/or files.
+        #>
         param(
             $source
         )
@@ -89,6 +314,14 @@ begin {
         }
     }
     function stage-node {
+        <#
+        .SYNOPSIS
+        Re-creates a given file by removing it first (if pre-existing) and creating a new file node.
+        This is used to create an empty stage on which to project object data in export-node.
+
+        .PARAMETER path
+        The literal file URI to use, either fully qualified or relative.
+        #>
         param(
             $path
         )
@@ -103,6 +336,24 @@ begin {
         }
     }
     function set-stepName {
+        <#
+        .SYNOPSIS
+        Compiles the name of a node directory in the steps or substeps structures of the automation.
+
+        .DESCRIPTION
+
+        Each step must be named uniquely and structured and reflect its order.
+        It is paramount the directory containing the step data and the configuration of the step itself are comprised ot the same data.
+        Therefore, each step directory's name is compiled into a FreeMarker source and stored, improperly but nonetheless,
+        in a step's 'customExecutionCondition' property.
+
+        .PARAMETER step
+        The object containing the step information converted from the automation's JSON export.
+
+        .PARAMETER name
+
+
+        #>
         param(
             $step
             ,
@@ -218,7 +469,7 @@ begin {
                                     $_step.PSobject.properties.name |? {
                                         $_ -notIn "url", "valueTemplate", "body", "subSteps"
                                     }
-                                ) | convertTo-Json -depth $__.depth | out-file -literalPath $_file;
+                                ) | convertTo-JSONsorted -depth $__.depth | out-file -literalPath $_file;
 
                                 "url", "valueTemplate", "body" |% {
                                     if ( [bool]( $_step.PSobject.properties.match( $_ ).name ) ) {
@@ -250,7 +501,7 @@ begin {
                 }
                 if ( -not $_done ) {
                     if ( $_asObject -or -not ( $_.value -is [PSobject] ) ) {
-                        $action | select-object $_.name | convertTo-Json -depth $__.depth | out-file -noNewLine -literalPath $_file;
+                        $action | select-object $_.name | convertTo-JSONsorted -depth $__.depth | out-file -noNewLine -literalPath $_file;
                     } else {
                         export-node -base $base -action $_.value -root $_root;
                     }
@@ -275,8 +526,16 @@ begin {
             [validateSet( "assembled", "dissected" )]
             [string]
             $action
+            ,
+            [hashtable]
+            $info
         )
-        $_epoch   = [datetime]::now.toString();
+        $_info      = @{
+            epoch   = [datetime]::now.toString()
+        };
+        if ( $info ) {
+            $_info += $info;
+        }
         $_file    = new-anchor -path $base;
         try {
             $_content = get-content -literalPath $_file -force -ea silentlyContinue | convertFrom-Json -ea silentlyContinue;
@@ -284,11 +543,7 @@ begin {
         } catch {
             $_content = new-object PSobject;
         }
-        if ( $_content.$action ) {
-            $_content.$action = $_epoch;
-        } else {
-            $_content | add-member -memberType noteProperty -name $action -value $_epoch;
-        }
+        $_content | add-member -memberType noteProperty -name $action -value $_info -force;
         $_content | convertTo-Json | set-content -literalPath $_file -force;
     }
     function dissect-action {
@@ -393,32 +648,24 @@ begin {
         } else {
             $_target = $target.fullName;
         }
-        $_indentation = [regex]::new( '^(?<indent>\s*)(?<line>.*)' );
-        $_size        = -1;
-        if ( $_result = import-node -base $base ) {
-        <#
-            $_assembled = [datetime]::now.toString();
-            $_assembled | set-content -literalPath ( new-anchor -path $base ) -force;
-            if ( $_result."assembled" ) {
-                $_result."assembled" = $_assembled;
-            } else {
-                $_result | add-member -memberType noteProperty -name "assembled" -value $_assembled;
+        # $_indentation   = [regex]::new( '^(?<indent>\s*)(?<line>.*)' );
+        # $_size          = -1;
+        if ( $_result   = import-node -base $base ) {
+            $_export    = $_result | convertTo-JSONsorted -depth $__.depth -compress:$__.compress;
+            $_info      = @{};
+            [system.text.encoding]::UTF8.getBytes(
+                ( $_export |% {
+                    $_ -replace '^\s*', ''
+                } )
+            ) |? {
+                $_ -notin 9, 32
+            } | measure-object -sum |% {
+                $_info.count  = [int64]$_.count;
+                $_info.sum    = [int64]$_.sum;
+                $_info.sparse = [bool]$sparse;
             }
-        #>
-            touch-anchor -base $base -action "assembled";
-            ( $_result | convertTo-Json -depth $__.depth ) -split "[`r`n]+" |% {
-                if ( $_indented = $_indentation.match( $_ ) ) {
-                    if ( $_size -lt 0 -and $_indented.groups["indent"].length -gt 0 ) {
-                        $_size = $_indented.groups["indent"].length;
-                    }
-                    @(
-                        $__.indentation * ( $_indented.groups["indent"].length / ( [math]::abs( $_size ) ) )
-                        $_indented.groups["line"].value
-                    ) -join '';
-                } else {
-                    $_;
-                }
-            } | out-file -literalPath $_target;
+            touch-anchor -base $base -action "assembled" -info $_info;
+            $_export | out-file -literalPath $_target;
         }
     }
 }
@@ -445,5 +692,4 @@ process {
             }
         }
     }
-
 }
